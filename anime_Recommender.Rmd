@@ -1,0 +1,225 @@
+---
+title: "Final Project"
+subtitle: "PSTAT 131 Fall 2023"
+date: "Due date: December 13th, 2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Homework3Setup, include=FALSE}
+#install.packages("tidyverse")
+#install.packages("ISLR")
+#install.packages("glmnet")
+#install.packages("tree")
+#install.packages("maptree")
+#install.packages("randomForest")
+#install.packages("gbm")
+#install.packages("ROCR")
+#install.packages("dplyr")
+#install.packages("leaps")
+#install.packages("cv")
+#install.packages("caret")
+#install.packages("ggfortify")
+library(caret)
+library(cv)
+library(leaps)
+library(tidyverse)
+library(glmnet)
+library(gbm)
+library(ROCR)
+library(dplyr)
+library(tree)
+library(maptree)
+library(randomForest)
+library(ggfortify)
+```
+
+This project will involve two sections, the first will revolve around creating a rudimentary recommendation engine based on data about anime that I have watched, and the second will revolve around using said data to better understand the various attributes and relationships that different anime genre have. 
+
+To begin with, let's read in our data.
+```{r DataSetup1}
+anime.raw_Data <- read_csv('MyAnimeList.csv',col_names = c("ID","PersonalRating","PublicRating","Age","Viewers","Studio","Medium","Name","Genre","Episodes"))
+```
+
+I created this data set by pulling upon the MyAnimeList database, which has various statistics about different anime series, as well as my personal list on the same website. 
+
+```{r DataSetup2}
+#creating variable Series, Yes if in a series, otherwise no; as well as setting all Studios which only occur once to "Small Studio"
+series = subset(anime.raw_Data, duplicated(Name))
+bigStudios = subset(anime.raw_Data, duplicated(Studio))
+anime.raw_Data = anime.raw_Data %>% mutate(Studio = ifelse(Studio %in% bigStudios$Studio, Studio, "Small Studio"), Series = ifelse(Name %in% series$Name, "Yes", "No"))
+anime.dat = anime.raw_Data %>% select(! ID) %>% mutate(Genre = as.factor(Genre), Medium = as.factor(Medium))
+head(anime.dat)
+```
+
+
+Let's being by fitting a linear regression, using the best subset method and AIC, BIC, Adjusted R-squares to pick the number of variables evaluation to determine the best predictors to include. 
+
+```{r bestSubset}
+#creating subsets
+models = regsubsets(PersonalRating ~ . -Name, data = anime.dat, nvmax = 19)
+summaryModels = summary(models)
+#best number of subsets according to,
+which.max(summaryModels$adjr2) #adjusted R-squared
+which.min(summaryModels$cp) #Cp
+which.min(summaryModels$bic) #BIC
+```
+
+We have conflicting answers about what the right amount of variables to use is, let's take a look at what variables are considered important, 
+
+```{r bestSubset2}
+coef(models,18)
+print("")
+coef(models,9)
+print("")
+coef(models,7)
+```
+
+Hmm, the adjusted R squared model includes many studios which don't appear often on my list, so I'll exclude that one, the BIC and Cp models seem to agree on many of the same variables, however Cp includes an additional Genre, which is more interesting to me to investigate, so we will use the 9 coeff model, or at least create a model inspired by it.  
+
+```{r LinearRegression}
+set.seed(123)
+#generating model
+anime.slr = lm(data = anime.dat, PersonalRating ~ PublicRating + as.factor(ifelse(Studio == "A-1", "A-1",ifelse(Studio == "Kyoto","Kyoto",ifelse(Studio == "MAPPA","MAPPA",ifelse(Studio == "Signal MD", "Signal MD", ifelse(Studio == "White Fox","White Fox", "other")))))) + as.factor(ifelse(Genre == "Other","Other", ifelse(Genre=="Rom-Com", "Rom-Com", ifelse(Genre=="Shounen","Shounen","assorted")))))
+summaryAnimeSLR = summary(anime.slr)
+#for readability renaming the variables accordingly
+rownames(summaryAnimeSLR$coefficients) = c("(intercept)","PublicRating","Kyoto","Mappa","StudioOther","Signal MD","White Fox","GenreOther","Rom-Com","Shounen")
+summaryAnimeSLR
+```
+
+Hmm, although we should have selected the best variables, I'm not satisfied with these results, let's clean up our parameters by removing the ones with low p values. 
+
+```{r reducedLinearRegression}
+set.seed(123)
+#generating reduced model
+anime.slr = lm(data = anime.dat, PersonalRating ~ PublicRating + as.factor(ifelse(Studio != "A-1", "Other","A-1")) + as.factor(ifelse(Genre == "Other","Other", ifelse(Genre=="Rom-Com", "Rom-Com", ifelse(Genre=="Shounen","Shounen","assorted")))))
+summaryAnimeSLR = summary(anime.slr)
+#for readability renaming the variables accordingly
+rownames(summaryAnimeSLR$coefficients) = c("(intercept)","PublicRating","not A-1 Studio","GenreOther","Rom-Com","Shounen")
+summaryAnimeSLR
+```
+
+Fantastic, now we have a solid linear regression model which we can be confident in, I'm going to be using 95% confidence as the threshold for tests, so seeing all coefficients above that seems solid, now let's perform some diagnostics to see if we can improve anymore, 
+
+```{r LinearDiagnostics}
+head(sort(hatvalues(anime.slr), decreasing = TRUE))
+head(sort(rstandard(anime.slr), decreasing = TRUE))
+head(sort(cooks.distance(anime.slr), decreasing = TRUE))
+```
+Clearly observation 18 is very irregular, let's investigate, 
+
+```{r LinearDiagnostics2}
+anime.dat[18,]
+```
+The issue is that our strongest predictor, PublicRating disagrees with my PersonalRating in this instance, I think it will make a more accurate model to disregard this entry so let's remove it. 
+
+```{r LinearDiagnostics3}
+set.seed(123)
+#generating improved model
+anime.slr = lm(data = anime.dat[-18,], PersonalRating ~ PublicRating + as.factor(ifelse(Studio != "A-1", "Other","A-1")) + as.factor(ifelse(Genre == "Other","Other", ifelse(Genre=="Rom-Com", "Rom-Com", ifelse(Genre=="Shounen","Shounen","assorted")))))
+summaryAnimeSLR = summary(anime.slr)
+#for readability renaming the variables accordingly
+rownames(summaryAnimeSLR$coefficients) = c("(intercept)","PublicRating","not A-1 Studio","GenreOther","Rom-Com","Shounen")
+summaryAnimeSLR
+```
+
+This is a fairly satisfactory model for my PersonalRating, we can see some key features which are interesting; Firstly, the strongest predictor of my personal rating is the public rating of the title, this makes sense, considering that I usually agree with the common consensus about shows. Getting into more personalized predictors, I apparently quite dislike the Shounen genre, but am a fan of the rom-com genre. On the topic of genres, it is interesting that when compared to other recognizable genres, I seem to have a bias towards series which don't fit into any mainstream genre (Other). In terms of Studios, only one made the cut, A-1 studio. This is actually probably the biggest surprise, I hadn't really thought much of A-1 studio, but after reviewing my data it does seem that they've made a couple of my favorite anime, so it makes sense that it is positively correlated. 
+
+Next, let's approximate test MSE to see how effective our model is,
+
+```{r LinearDiagnostics4}
+#doing cv approximation
+linearCV = cv(anime.slr, seed = 123)
+linearCV$`CV crit`
+```
+
+It's not perfect, but it will at least do a decent job of recommending new anime, I'm satisfied with these results, So,
+
+
+Now let's begin our second avenue of investigation, can we distinguish between genre's based on the other available variables? It should be noted that the data set it not ideal, because it is based solely on the series that I have watched, so this is an area that could be improved on if this project were to be refined. 
+
+
+In pursuit of learning about the distinguishing aspects of each Genre, let's begin with tree based methods. 
+
+```{r treeBasedSetup}
+set.seed(123)
+#note that due to cross validation issues with high dimensionality, we will be initializing a smaller, simplified dataset for use from here on out
+smolAnime.dat = anime.raw_Data %>% select(PublicRating, Age, Viewers, Episodes, Series, Genre) %>% mutate(Genre = ifelse(Genre == "Seinen", "Shounen",ifelse(Genre == "Comedy", "Rom-Com",ifelse(Genre == "Ecci", "Isekai", Genre)))) #note, similiar genre were combined
+#with a smaller subset, we will begin with cv pruned tree, 
+smolAnime.dat = smolAnime.dat %>% mutate(Genre = as.factor(Genre), Series = as.factor(Series))
+anime.tree = tree(Genre ~ .,data = smolAnime.dat)
+summary(anime.tree)
+```
+Ok, this is a decent start, but let's see if we can do a little bit better with some CV pruning, 
+
+```{r cvTreePruning}
+set.seed(123)
+#5 fold cross validation
+cv = cv.tree(anime.tree, FUN=prune.misclass, K=5)
+best.cv = min(cv$size[cv$dev == min(cv$dev)]) #this is equal to 11
+
+#pruning tree
+CV_pruneTree.anime = prune.misclass (anime.tree, best=best.cv)
+#plotting
+draw.tree(CV_pruneTree.anime,nodeinfo = TRUE,cex=.7)
+```
+
+Wow, these are already great, interesting results. It's extremely interesting seeing how the decision breaks line up with preconceived notions I had about each genre. For example, entries that have high rating and many episodes are sorted as Shounen. Now, let's see if we can build a better tree using a random forest, 
+
+```{r randomForest}
+set.seed(123)
+
+#fitting random forest model
+anime.rf = randomForest(Genre ~ ., data=smolAnime.dat, importance=TRUE)
+```
+```{r randomForest2}
+#retrieving relevant information
+anime.rf
+sort(anime.rf$importance[,3])
+```
+
+Interesting, it's useful to see which genres are harder to distinguish, clearly Isekai and Shounen are fairly easy to distinguish while Rom-Com and Other are harder. This makes sense, as there are less entries for Rom-Com or Other, and Other is simply a mixed bag of noise in the system. 
+
+Now I want to be able to visualize how all of the genre's are grouped according to the different variables, so let's set up a PCA to help visualize things. 
+
+```{r gettingPCs}
+pr.out = prcomp(smolAnime.dat[-22,1:4],scale. = TRUE, center = TRUE)
+#note observation removed because of extremely high episode value, which was disrupting the PCA
+```
+
+```{r plottingPCs}
+#plotting PC2 vs PC1, with color / text distinguishing Genre
+#rainbow_colors <- rainbow(4)
+#plot_colors <- rainbow_colors[as.factor(smolAnime.dat$Genre)]
+#plot(x = pr.out$x[,1], y = pr.out$x[,2], col=plot_colors,xlab = "PC1",ylab="PC2",type = "n")
+#text(x=pr.out$x[,1],y=pr.out$x[,2],labels=smolAnime.dat$Genre,col=plot_colors,xlab = "PC1",ylab="PC2",cex=.5)
+autoplot(pr.out, data = smolAnime.dat[-22,], colour = 'Genre',
+         loadings = TRUE, loadings.colour = 'black',
+         loadings.label = TRUE, loadings.label.size = 3)
+```
+
+Although only 70.53% of the variation is captured in this graph (and perhaps more or less covariation with Genre) I really enjoy this graph as it allows me to visualize which genres are more closely related, and how the location of points on the graph relates to our training variables. 
+
+Up until now, I had been continuing to include the "other" genre because I wanted to be able to compare against a baseline of unorganized random anime, as a sort of benchmark, but for the purposes of visual interpretation, I don't think it's neccessary, so I will remove it in the next PCA, 
+
+```{r gettingPCs2}
+smolAnime.dat2 = subset(smolAnime.dat,Genre != "Other")
+pr.out = prcomp(smolAnime.dat2[-19,1:4],scale. = TRUE, center = TRUE)
+#note observation removed because of extremely high episode value, which was disrupting the PCA
+```
+
+```{r plottingPCs2}
+#plotting PC2 vs PC1, with color / text distinguishing Genre
+#rainbow_colors <- rainbow(4)
+#plot_colors <- rainbow_colors[as.factor(smolAnime.dat$Genre)]
+#plot(x = pr.out$x[,1], y = pr.out$x[,2], col=plot_colors,xlab = "PC1",ylab="PC2",type = "n")
+#text(x=pr.out$x[,1],y=pr.out$x[,2],labels=smolAnime.dat$Genre,col=plot_colors,xlab = "PC1",ylab="PC2",cex=.5)
+autoplot(pr.out, data = smolAnime.dat2[-19,], colour = 'Genre',
+         loadings = TRUE, loadings.colour = 'black',
+         loadings.label = TRUE, loadings.label.size = 3)
+```
+
+Now that we are able to see a cleaned up PC representation of the data, I think that I have done a satisfactory job of investigating our two objectives, at least for the scope of this project. First, I constructed a linear regression using best subset to find a subset of promising variables, combined with a $\alpha$ = 0.05 decision boundary to keep variables, to select the variables to be used. Then I removed an observation which had too much leverage, and finally created a decently well constructed linear regression. After creating a rudimentary recommendation generator, I moved on to investigating the relationship between Genre and 5 variables, PublicRating, Viewers, Age, Episodes and Series. Thanks to a cv pruned tree I was able to visualize some of the sorting process for differentiating the Genres; and then using a random forest I was able to construct a more effective classifier and tell which Genres were easier to classify. Finally I created PCA visualizations of Genres distributions across the four variables. I learned a lot about my anime taste, as well as about anime Genres, but also about how working on a data science project works, and given more time there are many areas I could have improved on in this project. Hopefully I will have the oppurtunity to return to this project at some point, but for now these results are satisfactory, hopefully.
